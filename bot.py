@@ -5,29 +5,41 @@ import string
 from pyrogram import Client, filters
 from pyrogram.types import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from playwright.async_api import async_playwright
+from flask import Flask
+from threading import Thread
 
-# --- CONFIGURACIÓN TOTAL DIRECTA ---
+# --- CONFIGURACIÓN DE TELEGRAM ---
 API_ID = 32926930
 API_HASH = "07216e34019bc7fbbaa05954131e8bdc"
-BOT_TOKEN = "8588595625:AAF8YS-7MGjfX74jCMgsz9w_U1ZZ6SHKvnk"
+BOT_TOKEN = "8058527405:AAEr7xSTTdBxxxAwfiyyUoM-qVaoYu_O9nE"
 
 app = Client("paypal_pro_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Diccionario para gestionar los pasos de cada usuario
+# --- MINI WEB PARA RENDER (GRATIS) ---
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def home():
+    return "Bot de Ishak está Online!", 200
+
+def run_web():
+    # Render asigna un puerto automáticamente
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host='0.0.0.0', port=port)
+
+# --- LÓGICA DEL BOT ---
 user_data = {}
 
 def gen_id():
-    """Genera un ID de transacción realista estilo PayPal."""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=17)) + 'F'
 
-# Plantilla HTML Pro con Tailwind CSS
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="es">
+<html>
 <head>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700;800&display=swap');
         body {{ font-family: 'Open Sans', sans-serif; background-color: #f7f9fc; margin: 0; }}
         .receipt-card {{ max-width: 540px; background: white; margin: 0 auto; padding: 60px 50px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
     </style>
@@ -58,8 +70,8 @@ HTML_TEMPLATE = """
             </div>
             <div style="margin: 15px 0 10px 0; font-size: 15px; font-weight: 400; color: #000;">Pagado con:</div>
             <div style="display: flex; justify-content: space-between; font-size: 15px;">
-                <span>Saldo de PayPal (EUR)</span>
-                <span>{monto} € EUR</span>
+                <span style="color: #000;">Saldo de PayPal (EUR)</span>
+                <span style="color: #000;">{monto} € EUR</span>
             </div>
             <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
             <div style="display: flex; justify-content: space-between; font-weight: 700; font-size: 16px; color: #000;">
@@ -76,80 +88,61 @@ HTML_TEMPLATE = """
 """
 
 async def capture_receipt(data):
-    """Renderiza el HTML y toma una captura de pantalla."""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(args=["--no-sandbox", "--disable-setuid-sandbox"])
+        browser = await p.chromium.launch(args=["--no-sandbox"])
         page = await browser.new_page()
         content = HTML_TEMPLATE.format(
-            emisor=data['emisor'],
-            receptor=data['receptor'],
-            monto=data['monto'],
-            fecha=data['fecha'],
-            id_trans=gen_id()
+            emisor=data['emisor'], receptor=data['receptor'],
+            monto=data['monto'], fecha=data['fecha'], id_trans=gen_id()
         )
         await page.set_content(content)
-        await asyncio.sleep(1.5) # Espera para cargar fuentes/estilos
+        await asyncio.sleep(1.5)
         path = f"recibo_{gen_id()}.png"
-        await page.screenshot(path=path, full_page=True, scale="device")
+        await page.screenshot(path=path, full_page=True)
         await browser.close()
         return path
 
-# --- LÓGICA DEL BOT ---
-
 @app.on_message(filters.command("start"))
-async def start(client, message):
-    keyboard = ReplyKeyboardMarkup([
-        ["🚀 Generar Comprobante"],
-        ["ℹ️ Info", "⚙️ Soporte"]
-    ], resize_keyboard=True)
-    await message.reply(
-        f"👋 ¡Qué pasa **{message.from_user.first_name}**!\n\nListo para crear comprobantes realistas. Dale al botón de abajo.",
-        reply_markup=keyboard
-    )
+async def start(c, m):
+    kb = ReplyKeyboardMarkup([["🚀 Generar Comprobante"]], resize_keyboard=True)
+    await m.reply(f"🔥 ¡Qué pasa {m.from_user.first_name}! Sistema listo.", reply_markup=kb)
 
 @app.on_message(filters.regex("🚀 Generar Comprobante"))
-async def init_gen(client, message):
-    user_data[message.from_user.id] = {}
-    await message.reply(
-        "📝 **PASO 1:**\nEscribe el **Nombre o Correo del EMISOR**:",
-        reply_markup=ForceReply(selective=True)
-    )
+async def init(c, m):
+    user_data[m.from_user.id] = {}
+    await m.reply("📝 Nombre del EMISOR:", reply_markup=ForceReply(selective=True))
 
 @app.on_message(filters.reply & filters.text)
-async def process_steps(client, message):
-    uid = message.from_user.id
+async def steps(c, m):
+    uid = m.from_user.id
     if uid not in user_data: return
-    
-    step_data = user_data[uid]
-    text = message.text
+    d = user_data[uid]
+    if 'emisor' not in d:
+        d['emisor'] = m.text
+        await m.reply("👤 Nombre del RECEPTOR:", reply_markup=ForceReply(selective=True))
+    elif 'receptor' not in d:
+        d['receptor'] = m.text
+        await m.reply("💰 MONTO (ej: 10.00):", reply_markup=ForceReply(selective=True))
+    elif 'monto' not in d:
+        d['monto'] = m.text
+        await m.reply("📅 FECHA:", reply_markup=ForceReply(selective=True))
+    elif 'fecha' not in d:
+        d['fecha'] = m.text
+        btn = InlineKeyboardMarkup([[InlineKeyboardButton("💎 GENERAR", callback_data="gen")]])
+        await m.reply("✅ Listo para generar.", reply_markup=btn)
 
-    if 'emisor' not in step_data:
-        step_data['emisor'] = text
-        await message.reply("👤 **PASO 2:**\nEscribe el **Nombre o Correo del RECEPTOR**:", reply_markup=ForceReply(selective=True))
-    elif 'receptor' not in step_data:
-        step_data['receptor'] = text
-        await message.reply("💰 **PASO 3:**\nIntroduce el **MONTO** (ej: `10.00`):", reply_markup=ForceReply(selective=True))
-    elif 'monto' not in step_data:
-        step_data['monto'] = text
-        await message.reply("📅 **PASO 4:**\nIntroduce la **FECHA** (ej: `2 de mayo de 2026`):", reply_markup=ForceReply(selective=True))
-    elif 'fecha' not in step_data:
-        step_data['fecha'] = text
-        btn = InlineKeyboardMarkup([[InlineKeyboardButton("💎 GENERAR IMAGEN", callback_data="final_gen")]])
-        await message.reply("🔥 Todo listo. Dale a generar para crear la imagen realista.", reply_markup=btn)
+@app.on_callback_query(filters.regex("gen"))
+async def fin(c, q):
+    uid = q.from_user.id
+    await q.message.edit_text("⏳ Generando...")
+    path = await capture_receipt(user_data[uid])
+    await q.message.reply_photo(path)
+    if os.path.exists(path): os.remove(path)
+    del user_data[uid]
 
-@app.on_callback_query(filters.regex("final_gen"))
-async def finalize(client, callback_query):
-    uid = callback_query.from_user.id
-    if uid in user_data:
-        await callback_query.message.edit_text("⌛ Renderizando captura realista...")
-        try:
-            path = await capture_receipt(user_data[uid])
-            await callback_query.message.reply_photo(path, caption="✅ Comprobante generado con éxito.")
-            if os.path.exists(path): os.remove(path)
-            del user_data[uid]
-            await callback_query.message.delete()
-        except Exception as e:
-            await callback_query.message.edit_text(f"❌ Error: {e}")
-
-print("Bot encendido...")
-app.run()
+if __name__ == "__main__":
+    # Arrancar la web en un hilo aparte
+    Thread(target=run_web).start()
+    # Arrancar el bot
+    print("Bot encendido...")
+    app.run()
