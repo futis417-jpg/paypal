@@ -12,6 +12,7 @@ from flask import Flask
 from threading import Thread
 
 # --- CONFIGURACIÓN ---
+# Asegúrate de que estos datos son correctos
 API_ID = 32926930
 API_HASH = "07216e34019bc7fbbaa05954131e8bdc"
 BOT_TOKEN = "8588595625:AAF8YS-7MGjfX74jCMgsz9w_U1ZZ6SHKvnk"
@@ -20,13 +21,16 @@ ADMIN_ID = 8398522835
 app = Client("paypal_pro_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 web_app = Flask(__name__)
 
-# --- PERSISTENCIA SIMPLE ---
+# --- PERSISTENCIA ---
 DATA_FILE = "database.json"
 
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(DATA_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
     return {"users": {}, "tokens": {}, "stats": {"total_gen": 0}}
 
 def save_data(data):
@@ -34,6 +38,7 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 db = load_data()
+user_steps = {} # Estado temporal de generación
 
 # --- LÓGICA DE TIEMPO ---
 def get_expiry_date(days):
@@ -42,27 +47,58 @@ def get_expiry_date(days):
 
 def is_premium(uid):
     uid = str(uid)
+    if uid == str(ADMIN_ID): return True # Admin es premium siempre
     if uid not in db["users"]: return False
     expiry = db["users"][uid].get("expiry")
+    if not expiry or expiry == "No activo": return False
     if expiry == "Vitalicio ♾️": return True
-    if not expiry: return False
-    return datetime.strptime(expiry, "%d/%m/%Y") > datetime.now()
+    try:
+        return datetime.strptime(expiry, "%d/%m/%Y") > datetime.now()
+    except:
+        return False
 
-# --- NAVEGADOR ---
-browser_instance = None
-playwright_instance = None
+# --- NAVEGADOR (Optimizado para Render) ---
+async def capture_receipt(data):
+    async with async_playwright() as p:
+        try:
+            # Lanzamos navegador con argumentos para ahorrar RAM
+            browser = await p.chromium.launch(args=[
+                "--no-sandbox", 
+                "--disable-setuid-sandbox", 
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--no-zygote",
+                "--single-process"
+            ])
+            context = await browser.new_context(viewport={'width': 700, 'height': 900})
+            page = await context.new_page()
+            
+            tipo_msg = "Ha enviado" if data['tipo'] == "enviado" else "Ha recibido"
+            
+            # El ID de transacción se queda fijo en el objeto data para evitar cambios
+            trans_id = data.get('trans_id', 'PAY-' + ''.join(random.choices(string.ascii_uppercase + string.digits, k=12)))
+            
+            content = HTML_TEMPLATE.format(
+                emisor=data['emisor'], 
+                receptor=data['receptor'],
+                monto=data['monto'], 
+                fecha=data['fecha'], 
+                moneda=data['moneda'],
+                tipo_msg=tipo_msg,
+                id_trans=trans_id
+            )
+            
+            await page.set_content(content)
+            await asyncio.sleep(2) # Tiempo para renderizar estilos
+            
+            filename = f"recibo_{data['uid']}.png"
+            await page.screenshot(path=filename, full_page=True)
+            await browser.close()
+            return filename
+        except Exception as e:
+            print(f"Error en Playwright: {e}")
+            return None
 
-async def get_browser():
-    global browser_instance, playwright_instance
-    if not playwright_instance:
-        playwright_instance = await async_playwright().start()
-    if not browser_instance:
-        browser_instance = await playwright_instance.chromium.launch(
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-        )
-    return browser_instance
-
-# --- HTML TEMPLATE MEJORADO ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="es">
@@ -126,35 +162,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-async def capture_receipt(data):
-    try:
-        browser = await get_browser()
-        context = await browser.new_context(viewport={'width': 700, 'height': 900})
-        page = await context.new_page()
-        
-        tipo_msg = "Ha enviado" if data['tipo'] == "enviado" else "Ha recibido"
-        
-        content = HTML_TEMPLATE.format(
-            emisor=data['emisor'], 
-            receptor=data['receptor'],
-            monto=data['monto'], 
-            fecha=data['fecha'], 
-            moneda=data['moneda'],
-            tipo_msg=tipo_msg,
-            id_trans='PAY-' + ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
-        )
-        
-        await page.set_content(content)
-        await asyncio.sleep(1.5) 
-        
-        filename = f"recibo_{data['uid']}.png"
-        await page.screenshot(path=filename, full_page=True)
-        await context.close()
-        return filename
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
-
 # --- COMANDOS ---
 
 @app.on_message(filters.command("start"))
@@ -165,14 +172,14 @@ async def start(c, m):
     if uid not in db["users"]:
         db["users"][uid] = {
             "name": m.from_user.first_name,
-            "expiry": None,
+            "expiry": "No activo",
             "referidos": 0,
             "invitado_por": referido_por
         }
         if referido_por and referido_por in db["users"]:
             db["users"][referido_por]["referidos"] += 1
-            # Auto-recompensa: 3 referidos = 1 día premium
             if db["users"][referido_por]["referidos"] % 3 == 0:
+                # Damos 1 día si tiene 3 referidos
                 db["users"][referido_por]["expiry"] = get_expiry_date(1)
         save_data(db)
 
@@ -180,7 +187,7 @@ async def start(c, m):
     msg = (f"🚀 **Bienvenido al Generador Pro de PayPal**\n\n"
            f"👤 **Usuario:** {m.from_user.first_name}\n"
            f"⭐ **Rango:** {status}\n\n"
-           "Genera comprobantes realistas para tus negocios o bromas.")
+           "Genera comprobantes realistas para tus negocios.")
     
     kb = ReplyKeyboardMarkup([
         ["⚡ Generar Recibo", "👤 Mi Perfil"],
@@ -201,19 +208,11 @@ async def profile(c, m):
 
 @app.on_message(filters.regex("👥 Referidos"))
 async def refer(c, m):
-    link = f"https://t.me/{(await c.get_me()).username}?start={m.from_user.id}"
+    me = await c.get_me()
+    link = f"https://t.me/{me.username}?start={m.from_user.id}"
     await m.reply(f"🎁 **SISTEMA DE REFERIDOS**\n\n"
                   f"Por cada 3 amigos que invites, recibes **1 DÍA PREMIUM GRATIS**.\n\n"
                   f"🔗 **Tu enlace:** `{link}`")
-
-@app.on_message(filters.command("gen_token") & filters.user(ADMIN_ID))
-async def gen_token(c, m):
-    # Uso: /gen_token [días] (ej: /gen_token 30)
-    days = int(m.command[1]) if len(m.command) > 1 else 30
-    token = "PRO-" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
-    db["tokens"][token] = days
-    save_data(db)
-    await m.reply(f"🎫 **Token de {days} días generado:** `{token}`")
 
 @app.on_message(filters.command("redeem"))
 async def redeem(c, m):
@@ -228,15 +227,15 @@ async def redeem(c, m):
     else:
         await m.reply("❌ Token inválido.")
 
-# --- FLUJO GENERACIÓN ---
-user_steps = {}
+# --- FLUJO GENERACIÓN (Corregido y Unificado) ---
 
 @app.on_message(filters.regex("⚡ Generar Recibo"))
 async def init_gen(c, m):
-    if not is_premium(m.from_user.id):
-        return await m.reply("⚠️ Esta función es **Premium**.\n\nUsa `/redeem` o invita amigos para activarla.")
+    uid = m.from_user.id
+    if not is_premium(uid):
+        return await m.reply("⚠️ Esta función es **Premium**.\n\nUsa `/redeem` o invita 3 amigos para activarla.")
     
-    user_steps[m.from_user.id] = {"uid": m.from_user.id}
+    user_steps[uid] = {"uid": uid, "step": "tipo", "trans_id": 'PAY-' + ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))}
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Enviado", callback_data="t_enviado"), 
          InlineKeyboardButton("📥 Recibido", callback_data="t_recibido")]
@@ -245,62 +244,87 @@ async def init_gen(c, m):
 
 @app.on_callback_query(filters.regex("^t_"))
 async def set_type(c, q):
-    user_steps[q.from_user.id]["tipo"] = q.data.split("_")[1]
+    uid = q.from_user.id
+    if uid not in user_steps: return
+    user_steps[uid]["tipo"] = q.data.split("_")[1]
+    user_steps[uid]["step"] = "emisor"
     await q.message.edit_text("✍️ Escribe el nombre del **EMISOR**:", reply_markup=ForceReply(selective=True))
 
+@app.on_callback_query(filters.regex("^c_"))
+async def set_currency(c, q):
+    uid = q.from_user.id
+    if uid not in user_steps: return
+    user_steps[uid]["moneda"] = q.data.split("_")[1]
+    user_steps[uid]["step"] = "fecha"
+    await q.message.edit_text("📅 **FECHA** (ej: 12 may 2024):", reply_markup=ForceReply(selective=True))
+
+# HANDLER UNIFICADO PARA REPLIES
 @app.on_message(filters.reply & filters.text)
-async def handle_replies(c, m):
+async def handle_all_steps(c, m):
     uid = m.from_user.id
     if uid not in user_steps: return
     
-    step = user_steps[uid]
-    if "emisor" not in step:
-        step["emisor"] = m.text
+    state = user_steps[uid]
+    current_step = state.get("step")
+
+    if current_step == "emisor":
+        state["emisor"] = m.text
+        state["step"] = "receptor"
         await m.reply("👤 Escribe el nombre del **RECEPTOR**:", reply_markup=ForceReply(selective=True))
-    elif "receptor" not in step:
-        step["receptor"] = m.text
+    
+    elif current_step == "receptor":
+        state["receptor"] = m.text
+        state["step"] = "monto"
         await m.reply("💰 **MONTO** (ej: 150.00):", reply_markup=ForceReply(selective=True))
-    elif "monto" not in step:
-        step["monto"] = m.text.replace(',', '.')
+    
+    elif current_step == "monto":
+        state["monto"] = m.text.replace(',', '.')
+        state["step"] = "moneda"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("€ EUR", callback_data="c_EUR"), 
              InlineKeyboardButton("$ USD", callback_data="c_USD"),
              InlineKeyboardButton("£ GBP", callback_data="c_GBP")]
         ])
         await m.reply("💱 Selecciona la divisa:", reply_markup=kb)
-
-@app.on_callback_query(filters.regex("^c_"))
-async def set_currency(c, q):
-    uid = q.from_user.id
-    user_steps[uid]["moneda"] = q.data.split("_")[1]
-    await q.message.edit_text("📅 **FECHA** (ej: 12 may 2024):", reply_markup=ForceReply(selective=True))
-
-@app.on_message(filters.reply & filters.text)
-async def handle_date(c, m):
-    uid = m.from_user.id
-    if uid in user_steps and "moneda" in user_steps[uid] and "fecha" not in user_steps[uid]:
-        user_steps[uid]["fecha"] = m.text
-        await m.reply("⏳ Generando imagen de alta calidad...", reply_markup=None)
         
-        path = await capture_receipt(user_steps[uid])
+    elif current_step == "fecha":
+        state["fecha"] = m.text
+        state["step"] = "generating"
+        msg_wait = await m.reply("⏳ Generando imagen de alta calidad... Por favor espera.")
+        
+        path = await capture_receipt(state)
         if path:
             await m.reply_photo(path, caption="✅ **Comprobante Generado con Éxito**\nHecho con @PayProBot")
             if os.path.exists(path): os.remove(path)
             db["stats"]["total_gen"] += 1
             save_data(db)
         else:
-            await m.reply("❌ Error técnico. Reintenta.")
-        del user_steps[uid]
+            await m.reply("❌ Error al generar la imagen. Inténtalo de nuevo.")
+        
+        del user_steps[uid] # Limpiamos estado final
 
-# --- WEB & RUN ---
+# --- ADMIN COMMANDS ---
+@app.on_message(filters.command("gen_token") & filters.user(ADMIN_ID))
+async def gen_token_cmd(c, m):
+    try:
+        days = int(m.command[1]) if len(m.command) > 1 else 30
+        token = "PRO-" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+        db["tokens"][token] = days
+        save_data(db)
+        await m.reply(f"🎫 **Token de {days} días generado:** `{token}`")
+    except:
+        await m.reply("❌ Error. Uso: `/gen_token 30`")
+
+# --- WEB SERVER PARA RENDER ---
 @web_app.route('/')
-def home(): return "PayPro Bot is Live", 200
+def home(): return "Bot Online", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
+    # Arrancamos Flask en un hilo separado
     Thread(target=run_web, daemon=True).start()
-    print("Bot activo...")
+    print("Bot activo y servidor web iniciado...")
     app.run()
