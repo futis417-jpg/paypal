@@ -11,7 +11,7 @@ from threading import Thread
 # --- CONFIGURACIÓN DE TELEGRAM ---
 API_ID = 32926930
 API_HASH = "07216e34019bc7fbbaa05954131e8bdc"
-BOT_TOKEN = "8058527405:AAEr7xSTTdBxxxAwfiyyUoM-qVaoYu_O9nE"
+BOT_TOKEN = "8588595625:AAF8YS-7MGjfX74jCMgsz9w_U1ZZ6SHKvnk"
 
 app = Client("paypal_pro_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
