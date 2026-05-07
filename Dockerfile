@@ -1,11 +1,12 @@
-# 1. Imagen base de Python
+# Imagen base estable
 FROM python:3.9-slim
 
-# 2. Instalación de dependencias del sistema necesarias para Chromium y Playwright
-# Añadimos dependencias para que funcione en entornos sin monitor (headless)
+# Instalamos TODAS las dependencias de fuentes para que el recibo no salga con cuadros
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
+    fonts-liberation \
+    fonts-noto-color-emoji \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -20,25 +21,18 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     libgbm1 \
     libasound2 \
-    fonts-liberation \
     libpango-1.0-0 \
     libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Directorio de trabajo
 WORKDIR /app
 COPY . .
 
-# 4. Instalamos librerías de Python
 RUN pip install --no-cache-dir -r requirements.txt
-
-# 5. Instalamos Chromium y sus dependencias internas de Playwright
+# Forzamos la instalación de Chromium para Playwright
 RUN playwright install chromium
 RUN playwright install-deps chromium
 
-# 6. Puerto para Render (Variable de entorno)
 ENV PORT=10000
 
-# 7. Ejecutar el bot
-# Usamos python directo porque el bot ya maneja el hilo de Flask
 CMD ["python", "bot.py"]
